@@ -1,0 +1,6 @@
+{
+  "name": "Game Ular Tangga IPAS: Air Sumber Kehidupan Kelas 5 SD",
+  "description": "Media pembelajaran interaktif game ular tangga IPAS materi Air Sumber Kehidupan kelas 5 SD dengan bahan bacaan bersuara, kuis daur air, 25 siswa, dan laporan nilai guru.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
