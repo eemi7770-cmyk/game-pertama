@@ -4,21 +4,23 @@ import {
   Trophy, 
   RotateCcw, 
   HelpCircle, 
-  ArrowUpRight, 
-  ArrowDownRight, 
-  CheckCircle2, 
-  Volume2, 
   Users, 
   UserCheck, 
   Sparkles,
-  Award
+  Send,
+  Loader2,
+  CheckCircle,
+  AlertCircle,
+  User,
+  GraduationCap
 } from 'lucide-react';
 import { Student, StudentScore, Question } from '../types';
-import { TOTAL_TILES, BOARD_COLUMNS, BOARD_ROWS, LADDERS_AND_SNAKES, QUIZ_TILES, getTileCoordinates } from '../data/boardData';
+import { TOTAL_TILES, BOARD_COLUMNS, BOARD_ROWS, LADDERS_AND_SNAKES, QUIZ_TILES } from '../data/boardData';
 import { IPAS_QUESTIONS } from '../data/questionsData';
 import { Dice } from './Dice';
 import { QuizModal } from './QuizModal';
 import { sound } from '../utils/audio';
+import { sendScoreToGoogleSheets } from '../utils/sheets';
 
 interface PlayerInGame {
   student: Student;
@@ -33,6 +35,7 @@ interface PlayerInGame {
 interface GameBoardProps {
   students: Student[];
   studentScores: StudentScore[];
+  defaultClassName: string;
   onSaveScore: (scoreData: StudentScore) => void;
   onNavigateToReport: () => void;
   onNavigateToReading: () => void;
@@ -48,6 +51,7 @@ const PLAYER_COLORS = [
 export const GameBoard: React.FC<GameBoardProps> = ({
   students,
   studentScores,
+  defaultClassName,
   onSaveScore,
   onNavigateToReport,
   onNavigateToReading,
@@ -55,6 +59,10 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   // Game Setup State
   const [selectedStudentIds, setSelectedStudentIds] = useState<number[]>([1]); // default to first student
   const [gameMode, setGameMode] = useState<'single' | 'group'>('single');
+  const [studentNameInput, setStudentNameInput] = useState<string>(students[0]?.name || '');
+  const [studentClassInput, setStudentClassInput] = useState<string>(defaultClassName || 'Kelas 5 SD');
+  const [groupCustomNames, setGroupCustomNames] = useState<Record<number, string>>({});
+  const [setupError, setSetupError] = useState<string>('');
   const [isGameStarted, setIsGameStarted] = useState<boolean>(false);
 
   // Active Game State
@@ -63,9 +71,15 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   const [lastDiceValue, setLastDiceValue] = useState<number>(1);
   const [isMoving, setIsMoving] = useState<boolean>(false);
   const [gameLogs, setGameLogs] = useState<string[]>([
-    "Selamat datang di Game Ular Tangga Air Sumber Kehidupan! Pilih siswa dan tekan Mulai Permainan."
+    "Selamat datang di Game Ular Tangga Air Sumber Kehidupan! Isi nama siswa & kelas lalu tekan Mulai Permainan."
   ]);
   const [winner, setWinner] = useState<PlayerInGame | null>(null);
+  const [finalAwardedScore, setFinalAwardedScore] = useState<number>(0);
+
+  // Google Sheets Sync State
+  const [sheetSyncStatus, setSheetSyncStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [resendName, setResendName] = useState<string>('');
+  const [resendClass, setResendClass] = useState<string>('');
 
   // Quiz Modal State
   const [activeQuiz, setActiveQuiz] = useState<{
@@ -76,10 +90,69 @@ export const GameBoard: React.FC<GameBoardProps> = ({
 
   const [questionCount, setQuestionCount] = useState<number>(0);
 
+  useEffect(() => {
+    if (!isGameStarted && defaultClassName) {
+      setStudentClassInput(defaultClassName);
+    }
+  }, [defaultClassName, isGameStarted]);
+
+  const submitScoreToSheet = async (nama: string, kelas: string, nilai: number) => {
+    if (!nama.trim() || !kelas.trim()) {
+      setSheetSyncStatus('error');
+      return;
+    }
+    setSheetSyncStatus('sending');
+    try {
+      await sendScoreToGoogleSheets({
+        nama: nama.trim(),
+        kelas: kelas.trim(),
+        nilai,
+      });
+      setSheetSyncStatus('sent');
+      addLog(`📊 Nilai (${nilai}) untuk ${nama.trim()} (${kelas.trim()}) otomatis terkirim ke Google Sheets!`);
+    } catch (err) {
+      console.error('Gagal mengirim ke Google Sheets:', err);
+      setSheetSyncStatus('error');
+      addLog(`⚠️ Gagal mengirim nilai ke Google Sheets. Silakan coba kirim ulang.`);
+    }
+  };
+
   // Initialize or start game
   const handleStartGame = () => {
-    const chosenStudents = students.filter(s => selectedStudentIds.includes(s.id));
-    if (chosenStudents.length === 0) return;
+    if (!studentClassInput.trim()) {
+      setSetupError('Mohon isi Nama Kelas terlebih dahulu sebelum memulai permainan.');
+      return;
+    }
+
+    let chosenStudents: Student[] = [];
+
+    if (gameMode === 'single') {
+      const trimmedName = studentNameInput.trim();
+      if (!trimmedName) {
+        setSetupError('Mohon isi Nama Siswa terlebih dahulu sebelum memulai permainan.');
+        return;
+      }
+      const matched = students.find(
+        (s) => s.name.toLowerCase() === trimmedName.toLowerCase()
+      );
+      if (matched) {
+        chosenStudents = [matched];
+      } else {
+        chosenStudents = [{ id: Date.now(), no: 0, name: trimmedName.toUpperCase() }];
+      }
+    } else {
+      const selected = students.filter(s => selectedStudentIds.includes(s.id));
+      if (selected.length === 0) {
+        setSetupError('Pilih minimal 1 siswa untuk mode kelompok.');
+        return;
+      }
+      chosenStudents = selected.map((s) => ({
+        ...s,
+        name: (groupCustomNames[s.id] ?? s.name).trim() || s.name,
+      }));
+    }
+
+    setSetupError('');
 
     const initializedPlayers: PlayerInGame[] = chosenStudents.map((s, idx) => ({
       student: s,
@@ -95,11 +168,13 @@ export const GameBoard: React.FC<GameBoardProps> = ({
     setActivePlayerIndex(0);
     setLastDiceValue(1);
     setWinner(null);
+    setFinalAwardedScore(0);
+    setSheetSyncStatus('idle');
     setIsMoving(false);
     setIsGameStarted(true);
     setQuestionCount(0);
 
-    const welcomeMsg = `Permainan dimulai! Giliran pertama: ${initializedPlayers[0].student.name}. Lempar dadumu!`;
+    const welcomeMsg = `Permainan dimulai! Kelas ${studentClassInput.trim()}, giliran pertama: ${initializedPlayers[0].student.name}. Lempar dadumu!`;
     setGameLogs([welcomeMsg]);
     sound.speakText(welcomeMsg);
   };
@@ -107,6 +182,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   const handleResetGame = () => {
     setIsGameStarted(false);
     setWinner(null);
+    setSheetSyncStatus('idle');
     setIsMoving(false);
     setActiveQuiz(null);
   };
@@ -289,11 +365,15 @@ export const GameBoard: React.FC<GameBoardProps> = ({
     sound.speakText(winSpeech);
     addLog(`🏆 SELAMAT! ${winningPlayer.student.name} MENCAPAI FINISH SAMUDRA AIR BERSIH!`);
 
-    // Auto-save score into teacher gradebook
+    // Compute final score consistently for UI, Teacher Gradebook, and Google Sheets
     const totalAnswered = winningPlayer.correctAnswers + winningPlayer.wrongAnswers;
     const computedScore = totalAnswered > 0 
       ? Math.round((winningPlayer.correctAnswers / totalAnswered) * 100)
       : Math.min(100, Math.max(75, winningPlayer.score));
+
+    setFinalAwardedScore(computedScore);
+    setResendName(winningPlayer.student.name);
+    setResendClass(studentClassInput.trim());
 
     const finalRecord: StudentScore = {
       studentId: winningPlayer.student.id,
@@ -316,6 +396,9 @@ export const GameBoard: React.FC<GameBoardProps> = ({
     };
 
     onSaveScore(finalRecord);
+
+    // Send score automatically to Google Sheets Web App
+    void submitScoreToSheet(winningPlayer.student.name, studentClassInput, computedScore);
   };
 
   // Render individual tile in the 50-tile board
@@ -458,7 +541,10 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             <button
               onClick={() => {
                 setGameMode('single');
-                setSelectedStudentIds([selectedStudentIds[0] || 1]);
+                const firstId = selectedStudentIds[0] || 1;
+                setSelectedStudentIds([firstId]);
+                const matched = students.find(s => s.id === firstId);
+                if (matched) setStudentNameInput(matched.name);
               }}
               className={`flex items-center gap-2 px-4 py-2.5 rounded-2xl text-xs sm:text-sm font-bold border transition-all ${
                 gameMode === 'single'
@@ -488,20 +574,118 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             </button>
           </div>
 
+          {/* Input Identitas Siswa & Kelas (untuk Google Sheets & Laporan) */}
+          <div className="p-4 sm:p-5 rounded-2xl bg-sky-50/80 border border-sky-200 space-y-4">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <Send className="w-4 h-4 text-sky-700" />
+                <h3 className="text-sm font-extrabold text-sky-950">
+                  Data Siswa & Kelas (Otomatis Terkirim ke Google Sheets)
+                </h3>
+              </div>
+              <span className="text-[11px] font-bold text-sky-700 bg-white px-2.5 py-0.5 rounded-full border border-sky-200">
+                Wajib Diisi Sebelum Bermain
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {gameMode === 'single' ? (
+                <div>
+                  <label htmlFor="input-nama-siswa" className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                    Nama Siswa
+                  </label>
+                  <div className="relative">
+                    <User className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
+                    <input
+                      id="input-nama-siswa"
+                      type="text"
+                      value={studentNameInput}
+                      onChange={(e) => {
+                        setStudentNameInput(e.target.value);
+                        setSetupError('');
+                      }}
+                      placeholder="Pilih dari daftar di bawah atau ketik nama..."
+                      className="w-full pl-9 pr-3 py-2.5 text-sm bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-sky-500 focus:outline-hidden font-semibold text-slate-800"
+                      required
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <label className="block text-xs font-bold text-slate-700 uppercase">
+                    Nama Pemain Kelompok ({selectedStudentIds.length} Siswa)
+                  </label>
+                  <div className="grid grid-cols-1 gap-2">
+                    {students
+                      .filter(s => selectedStudentIds.includes(s.id))
+                      .map((s, idx) => (
+                        <div key={s.id} className="relative flex items-center gap-2">
+                          <span className="text-[10px] font-black w-5 h-5 rounded-md bg-sky-600 text-white flex items-center justify-center shrink-0">
+                            {idx + 1}
+                          </span>
+                          <input
+                            type="text"
+                            value={groupCustomNames[s.id] ?? s.name}
+                            onChange={(e) => {
+                              setGroupCustomNames(prev => ({ ...prev, [s.id]: e.target.value }));
+                              setSetupError('');
+                            }}
+                            placeholder={`Nama Siswa ${idx + 1}`}
+                            className="w-full px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-sky-500 focus:outline-hidden font-semibold text-slate-800"
+                          />
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label htmlFor="input-kelas-siswa" className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                  Kelas
+                </label>
+                <div className="relative">
+                  <GraduationCap className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
+                  <input
+                    id="input-kelas-siswa"
+                    type="text"
+                    value={studentClassInput}
+                    onChange={(e) => {
+                      setStudentClassInput(e.target.value);
+                      setSetupError('');
+                    }}
+                    placeholder="Contoh: Kelas V (Lima) / 5A"
+                    className="w-full pl-9 pr-3 py-2.5 text-sm bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-sky-500 focus:outline-hidden font-semibold text-slate-800"
+                    required
+                  />
+                </div>
+              </div>
+            </div>
+
+            {setupError && (
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{setupError}</span>
+              </div>
+            )}
+          </div>
+
           {/* 25 Student Selection Grid */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <label className="text-xs font-black uppercase text-slate-700">
-                Pilih Nama Siswa ({selectedStudentIds.length} Siswa Terpilih):
+                Pilih Cepat dari Daftar 25 Siswa ({selectedStudentIds.length} Siswa Terpilih):
               </label>
               <span className="text-xs text-slate-500">
-                {gameMode === 'single' ? 'Pilih 1 siswa' : 'Maksimal 4 siswa per sesi'}
+                {gameMode === 'single' ? 'Klik 1 siswa untuk mengisi otomatis' : 'Maksimal 4 siswa per sesi'}
               </span>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 max-h-72 overflow-y-auto p-1">
               {students.map((student) => {
-                const isSelected = selectedStudentIds.includes(student.id);
+                const isSelected =
+                  gameMode === 'single'
+                    ? studentNameInput.trim().toLowerCase() === student.name.toLowerCase()
+                    : selectedStudentIds.includes(student.id);
                 const scoreInfo = studentScores.find(s => s.studentId === student.id);
 
                 return (
@@ -509,8 +693,10 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                     key={student.id}
                     type="button"
                     onClick={() => {
+                      setSetupError('');
                       if (gameMode === 'single') {
                         setSelectedStudentIds([student.id]);
+                        setStudentNameInput(student.name);
                       } else {
                         if (isSelected) {
                           if (selectedStudentIds.length > 1) {
@@ -737,27 +923,27 @@ export const GameBoard: React.FC<GameBoardProps> = ({
       {/* Victory Celebration Modal */}
       {winner && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in zoom-in-95 duration-200">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 text-center shadow-2xl border-2 border-amber-300 space-y-5">
-            <div className="w-20 h-20 mx-auto rounded-3xl bg-gradient-to-tr from-amber-400 to-yellow-300 flex items-center justify-center text-4xl shadow-lg shadow-amber-300/50 animate-bounce">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 text-center shadow-2xl border-2 border-amber-300 space-y-4 max-h-[92vh] overflow-y-auto">
+            <div className="w-16 h-16 mx-auto rounded-3xl bg-gradient-to-tr from-amber-400 to-yellow-300 flex items-center justify-center text-3xl shadow-lg shadow-amber-300/50 animate-bounce">
               🏆
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <span className="text-xs font-black uppercase tracking-wider px-3 py-1 rounded-full bg-amber-100 text-amber-900">
                 Juara Air Sumber Kehidupan
               </span>
-              <h3 className="text-2xl font-black text-slate-900">
+              <h3 className="text-xl sm:text-2xl font-black text-slate-900">
                 Selamat, {winner.student.name}!
               </h3>
               <p className="text-xs text-slate-600">
-                Kamu telah menyelesaikan petualangan siklus air dan berhasil membawa tetes air bersih kembali ke samudra dengan selamat!
+                Kamu telah menyelesaikan petualangan siklus air dan berhasil membawa tetes air bersih kembali ke samudra!
               </p>
             </div>
 
-            <div className="p-4 rounded-2xl bg-sky-50 border border-sky-100 grid grid-cols-2 gap-2 text-center">
+            <div className="p-3.5 rounded-2xl bg-sky-50 border border-sky-100 grid grid-cols-2 gap-2 text-center">
               <div>
-                <div className="text-[11px] text-slate-500 font-bold">Skor Akhir</div>
-                <div className="text-xl font-black text-sky-700">{winner.score} / 100</div>
+                <div className="text-[11px] text-slate-500 font-bold">Nilai Akhir</div>
+                <div className="text-xl font-black text-sky-700">{finalAwardedScore} / 100</div>
               </div>
               <div>
                 <div className="text-[11px] text-slate-500 font-bold">Kuis Benar</div>
@@ -765,7 +951,78 @@ export const GameBoard: React.FC<GameBoardProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center gap-2 pt-2">
+            {/* Google Sheets Auto-Submission Status Card */}
+            <div className={`p-3.5 rounded-2xl border text-left space-y-2.5 ${
+              sheetSyncStatus === 'sent'
+                ? 'bg-emerald-50 border-emerald-200'
+                : sheetSyncStatus === 'error'
+                ? 'bg-rose-50 border-rose-200'
+                : 'bg-indigo-50 border-indigo-200'
+            }`}>
+              <div className="flex items-center gap-2">
+                {sheetSyncStatus === 'sending' && (
+                  <>
+                    <Loader2 className="w-4 h-4 text-indigo-600 animate-spin shrink-0" />
+                    <span className="text-xs font-extrabold text-indigo-900">
+                      Mengirim nilai otomatis ke Google Sheets...
+                    </span>
+                  </>
+                )}
+                {sheetSyncStatus === 'sent' && (
+                  <>
+                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span className="text-xs font-extrabold text-emerald-900">
+                      Nilai berhasil dikirim otomatis ke Google Sheets!
+                    </span>
+                  </>
+                )}
+                {sheetSyncStatus === 'error' && (
+                  <>
+                    <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                    <span className="text-xs font-extrabold text-rose-900">
+                      Gagal mengirim otomatis ke Google Sheets.
+                    </span>
+                  </>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-0.5">
+                    Nama Siswa
+                  </label>
+                  <input
+                    type="text"
+                    value={resendName}
+                    onChange={(e) => setResendName(e.target.value)}
+                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg font-bold text-slate-800"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-0.5">
+                    Kelas
+                  </label>
+                  <input
+                    type="text"
+                    value={resendClass}
+                    onChange={(e) => setResendClass(e.target.value)}
+                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg font-bold text-slate-800"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={sheetSyncStatus === 'sending' || !resendName.trim() || !resendClass.trim()}
+                onClick={() => submitScoreToSheet(resendName, resendClass, finalAwardedScore)}
+                className="w-full py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-xs font-bold text-slate-700 flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50"
+              >
+                <Send className="w-3.5 h-3.5 text-sky-600" />
+                <span>{sheetSyncStatus === 'sent' ? 'Kirim Ulang ke Google Sheets' : 'Kirim Sekarang ke Google Sheets'}</span>
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
               <button
                 onClick={handleResetGame}
                 className="flex-1 py-3 rounded-2xl border border-slate-200 hover:bg-slate-50 text-xs font-bold text-slate-700 transition-colors"

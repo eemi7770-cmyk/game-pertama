@@ -125,6 +125,7 @@ export default function App() {
           <GameBoard
             students={INITIAL_STUDENTS}
             studentScores={studentScores}
+            defaultClassName={schoolInfo.className}
             onSaveScore={handleSaveScore}
             onNavigateToReport={() => setActiveTab('report')}
             onNavigateToReading={() => setActiveTab('reading')}
